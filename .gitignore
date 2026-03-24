@@ -87,3 +87,6 @@ datasets/
 # =========================
 *.csv
 *.parquet
+
+tasks/media/
+*.gif
