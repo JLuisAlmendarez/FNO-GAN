@@ -1,0 +1,869 @@
+\documentclass[runningheads]{llncs}
+
+% ============= PACKAGES =============
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[section]{placeins}
+\usepackage{float}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{xcolor}
+
+% ============= DOCUMENT =============
+\begin{document}
+
+% ============= TITLE =============
+\title{Generative Adversarial Fourier Neural Operator for CFD}
+
+\author{José Luis Almendarez Gonzalez}
+
+\authorrunning{Almendarez}
+
+\institute{ITESO University\\
+\email{jose.almendarez@iteso.mx}}
+
+\maketitle
+
+% ============= ABSTRACT =============
+\begin{abstract}
+In this work, a Generative Adversarial Fourier Neural Operator (GA-FNO) is presented for surrogate modeling of 2D Kolmogorov turbulence. The architecture employs two specialized discriminators: one evaluating the statistical coherence of generated trajectories and one evaluating Navier-Stokes residuals between frames. Zero-shot generalization to extended spatial domains is demonstrated through domain decomposition with cosine blending. Additionally, super-resolution capabilities and an Inverse Boundary Method for object simulation within generated flow fields are explored as post-processing extensions.
+
+In the document Mathematical and Experimental details are discussed also autoregressive limitations are presented, in particular the emergence of spurious attractors in long-horizon rollouts, providing insights for future architecture and training improvements.
+
+\keywords{Generative Adversarial Fourier Neural Operator \and GA-FNO \and turbulence surrogate modeling \and Fourier Neural Operator \and 2D Kolmogorov turbulence \and physics-informed discriminators \and Navier-Stokes residuals \and spectral convolution \and zero-shot super-resolution \and domain decomposition \and immersed boundary method}
+\end{abstract}
+
+% ============= INTRODUCTION =============
+\section{Introduction}
+
+The world of machine learning and numerical simulations are deeply tied, as machine learning methods can leverage simulation data to optimize and accelerate real life applications. Following this, we have approached the problem with a generative adversarial focus, looking for the probabilistic distribution that best replicates the non-linear dynamics of fluid flow.
+
+Generative Adversarial Networks present a natural framework for this problem for three key reasons. First, they are the only generative framework that learns a distribution without explicit supervision — the generator does not need to know where the ground truth is, it only needs to fool the discriminator. Second, the adversarial nature is well suited for turbulence — two competing networks capture chaotic dynamics more naturally than deterministic models. Third, the discriminator acts as an implicit physical critic, learning what makes a trajectory physically plausible without being explicitly told.
+
+Building on this, we extend the standard GAN framework with two specialized discriminators. The first evaluates the statistical coherence of the generated trajectories as a whole, while the second evaluates the Navier-Stokes residual between frames — ensuring that the generated flow respects the underlying physical equations at every timestep. The generator itself is implemented as a Neural Operator, which learns the solution operator of the flow dynamics directly in Fourier spectral space.
+
+% ============= MATHEMATICAL FOUNDATIONS =============
+\section{Mathematical Foundations}
+
+\subsection{Navier-Stokes in Vorticity Form}
+
+The 2D incompressible Navier-Stokes equations are expressed in
+vorticity-stream function form. Let $\omega = \nabla \times u$
+be the vorticity field. The governing equation is:
+
+\begin{equation}
+\frac{\partial \omega}{\partial t} + u \frac{\partial \omega}{\partial x}
++ v \frac{\partial \omega}{\partial y} = \nu \nabla^2 \omega + f
+\end{equation}
+
+where $\nu = UL/Re$ is the kinematic viscosity, $f = \sin(Ky)$ is
+the Kolmogorov forcing, and $(u, v)$ is the velocity field recovered
+from the stream function $\psi$ via:
+
+\begin{equation}
+u = \frac{\partial \psi}{\partial y}, \quad
+v = -\frac{\partial \psi}{\partial x}, \quad
+\nabla^2 \psi = -\omega
+\end{equation}
+
+The Navier-Stokes residual, used as input to the physical
+discriminator, is defined as:
+
+\begin{equation}
+R = \frac{\partial \omega}{\partial t} + u \frac{\partial \omega}{\partial x}
++ v \frac{\partial \omega}{\partial y} - \nu \nabla^2 \omega - f
+\end{equation}
+
+If $R = 0$ the field is physically consistent; otherwise $R \neq 0$
+quantifies the violation. Discretizing in time:
+
+\begin{equation}
+\omega^{n+1} = \omega^n + \Delta t \left(
+-\frac{\partial \psi}{\partial y}\frac{\partial \omega}{\partial x}
++ \frac{\partial \psi}{\partial x}\frac{\partial \omega}{\partial y}
++ \nu \nabla^2 \omega + f \right)
+\end{equation}
+
+\subsection{Spectral Solver}
+
+The stream function is recovered spectrally in three steps.
+First, the FFT maps the vorticity to Fourier space:
+
+\begin{equation}
+\hat{\omega}(k_x, k_y) = \sum_{x,y} \omega(x,y)\, e^{-i(k_x x + k_y y)}
+\end{equation}
+
+Second, the Poisson equation $\nabla^2 \psi = -\omega$ becomes
+algebraic in Fourier space:
+
+\begin{equation}
+\hat{\psi}_{k_x, k_y} = \frac{\hat{\omega}_{k_x, k_y}}{k_x^2 + k_y^2}
+\end{equation}
+
+Third, the physical stream function is recovered via the
+inverse FFT:
+
+\begin{equation}
+\psi(x,y) = \sum_{k_x, k_y} \hat{\psi}(k_x, k_y)\, e^{i(k_x x + k_y y)}
+\end{equation}
+
+from which the velocity components are obtained as
+$u = \partial_y \psi$, $v = -\partial_x \psi$, computed
+spectrally as $\hat{u} = ik_y \hat{\psi}$,
+$\hat{v} = ik_x \hat{\psi}$, followed by IFFT.
+
+\subsection{Spectral Convolution}
+
+Given an input field $w(x,y)$, the spectral convolution layer first
+maps it to Fourier space:
+
+\begin{equation}
+\hat{w}(k_x, k_y) = \mathcal{F}(w)
+\end{equation}
+
+A complex-valued linear transformation is then applied to the
+spectral coefficients. The output representation $\hat{h}$ is
+obtained by multiplying $\hat{w}$ with a trainable weight tensor:
+
+\begin{equation}
+\hat{h}_{o}(k_x,k_y) = \sum_{i=1}^{C_{\text{in}}}
+W_{io}(k_x,k_y)\, \hat{w}_{i}(k_x,k_y)
+\end{equation}
+
+where $C_{\text{in}}$ and $C_{\text{out}}$ denote the number of
+input and output channels, respectively, and
+$W_{io}(k_x,k_y) \in \mathbb{C}$ are complex weights. These are
+initialized as:
+
+\begin{equation}
+W = \frac{1}{C_{\text{in}} C_{\text{out}}}
+\left( R_r + i R_i \right), \quad R_r, R_i \sim \mathcal{N}(0,1)
+\end{equation}
+
+In practice, this operation is restricted to a truncated set of
+Fourier modes, retaining only low-frequency components.
+
+Finally, the output field in physical space is obtained via the
+inverse transform:
+
+\begin{equation}
+h(x,y) = \mathcal{F}^{-1}(\hat{h})
+\end{equation}
+
+This formulation corresponds to a global convolution operator,
+implemented efficiently through FFTs, where the kernel is learned
+directly in spectral space.
+
+\subsection{Wasserstein Distance and Gradient Penalty}
+
+By the Kantorovich-Rubinstein duality, the Wasserstein-1 distance
+between the real distribution $p_r$ and the generated distribution
+$p_g$ is:
+
+\begin{equation}
+W_1(p_r, p_g) = \sup_{\|\nabla D\|_2 \leq 1}
+\int D(x)\bigl(p_r(x) - p_g(x)\bigr)\, dx
+\end{equation}
+
+which in expectation form reads
+$\mathbb{E}_{p_r}[D(x)] - \mathbb{E}_{p_g}[D(x)]$.
+The 1-Lipschitz constraint $|D(x) - D(G(z))| \leq \|x - G(z)\|$
+is enforced softly via a gradient penalty. The discriminator
+loss is:
+
+\begin{equation}
+\mathcal{L}_D = \mathbb{E}[D(G(z))] - \mathbb{E}[D(x)]
++ \lambda\, \mathbb{E}_{\hat{x}}\!\left[\left(\|\nabla D(\hat{x})\|_2 - 1\right)^2\right]
+\end{equation}
+
+where the interpolated samples are drawn as:
+
+\begin{equation}
+\hat{x} = \alpha\, x + (1-\alpha)\, G(z), \quad \alpha \sim \mathcal{U}[0,1]
+\end{equation}
+
+\subsection{Inverse Boundary Method}
+
+The Inverse Boundary Method is integrated into the vorticity–stream
+function formulation of the 2D incompressible Navier–Stokes equations
+to handle embedded obstacles within a periodic domain. The boundary
+condition is enforced at the level of the Poisson solve through a
+volume penalization approach. Given a predicted vorticity field
+$\omega$, a free stream function $\psi$ is first obtained from the
+Poisson equation:
+
+\begin{equation}
+\nabla^2 \psi - \chi(x,y)\,\frac{1}{\eta}\big(\psi - \psi_s\big) = -\omega
+\end{equation}
+
+where $\chi(x,y)$ is a smooth indicator function of the obstacle and
+$\eta \ll 1$ is the penalization parameter. This enforces
+$\psi \to \psi_b$ inside the obstacle, approximating the boundary
+condition.
+
+In practice, this is implemented iteratively. Starting from the free solution
+$\psi^{(0)}$, the stream function is updated using a relaxed Jacobi-like iteration.
+The residual at step $k$ is defined as:
+\begin{equation}
+\Delta \psi^{(k)} = -\nabla^2 \psi^{(k)} + \frac{\chi}{\eta}\bigl(\psi^{(k)} - \psi_s\bigr) - \omega
+\end{equation}
+and the update step is:
+\begin{equation}
+\psi^{(k+1)} = \psi^{(k)} + \beta\, \Delta \psi^{(k)}
+\end{equation}
+where $\beta \in (0,1]$ is a relaxation parameter. After convergence, the corrected stream function $\psi_{\text{corr}}$
+is used to recover the velocity field and the vorticity:
+
+\begin{equation}
+\omega^{(k)} = -\nabla^2 \psi^{(k)}
+\end{equation}
+
+This modified projection step is embedded within each time update
+of the Navier–Stokes dynamics, allowing the evolution of $\omega$
+to respect obstacle-induced constraints without breaking the
+spectral structure of the solver.
+
+\subsection{Model Structure}
+
+\subsubsection{Generator}
+
+The generator $G_\theta$ is implemented as a Fourier Neural Operator
+(FNO) that learns a mapping between consecutive vorticity fields.
+Given the current state $\omega^n \in \mathbb{R}^{H \times W}$ and
+a latent vector $z \sim \mathcal{N}(0, I)$, the input is first lifted
+to a higher-dimensional feature space:
+
+\begin{equation}
+h_{ij}^{(0)} = W_{\text{lift}} \cdot [\delta{ij}^n,\, z]
+\end{equation}
+
+A sequence of $L$ FNO blocks is then applied. Each block consists
+of a spectral convolution combined with a local linear transformation
+and a nonlinearity:
+
+\begin{equation}
+h^{(\ell+1)} = \text{GELU}\!\left(
+\frac{\mathcal{K}^{(\ell)}(h^{(\ell)}) + W_{\text{conv}}^{(\ell)}\, h^{(\ell)} - \mu^{(\ell)}}{\sigma^{(\ell)}}
+\right), \quad \ell = 0, \dots, L-1
+\end{equation}
+
+where each block has independent trainable parameters, including
+spectral weights, pointwise linear mappings, and normalization
+statistics. This stacked structure enables the model to learn
+progressively richer representations in Fourier space.
+
+After the final block, the feature map
+$h^{(L)} \in \mathbb{R}^{C \times H \times W}$ is projected back
+to a scalar field:
+
+\begin{equation}
+h({\omega}) = W_{\text{proj}} \cdot h^{(L)}, \quad
+h({\omega}) \in \mathbb{R}^{H \times W}
+\end{equation}
+
+Finally, a residual connection produces the next state:
+
+\begin{equation}
+\omega^{n+1} = \omega^n + h({\omega})
+\end{equation}
+
+\subsubsection{Discriminators}
+
+Two discriminators with identical architectures are employed,
+differing only in their input.
+
+\paragraph{Statistical discriminator $D_{\text{stat}}$.}
+Receives a full generated trajectory
+\[
+\mathcal{T} =
+\begin{pmatrix}
+\delta^0 \\
+\delta^1 \\
+\vdots \\
+\delta^9
+\end{pmatrix}
+\in \mathbb{R}^{10 \times H \times W}
+\]
+A temporal convolutional encoder produces
+$h \in \mathbb{R}^{64 \times H \times W}$:
+
+\begin{equation}
+\mathcal{T} \;\longrightarrow\; h \in \mathbb{R}^{64 \times H \times W}
+\end{equation}
+
+The convolution across channels is given by:
+
+\begin{equation}
+h_k(x,y) = \sum_{i=1}^{64} W_{k,i}\, \delta_i(x,y)
+\end{equation}
+
+\[
+\begin{gathered}
+h_1 = w_{1,1}\delta_1 + w_{1,2}\delta_2 + \cdots + w_{1,10}\delta_{10}
+\\[10pt]
+h_2 = w_{2,1}\delta_1 + w_{2,2}\delta_2 + \cdots + w_{2,10}\delta_{10}
+\\[10pt]
+\vdots
+\\[10pt]
+h_{64} = w_{64,1}\delta_1 + \cdots + w_{64,10}\delta_{10}
+\end{gathered}
+\]
+
+The representation is then processed by FNO blocks, preserving
+the dimensionality:
+
+\begin{equation}
+h \;\longrightarrow\; h' \in \mathbb{R}^{64 \times H \times W}
+\end{equation}
+
+A spatial average is applied:
+
+\begin{equation}
+\bar{h}_k = \frac{1}{HW} \sum_{x,y} h'_k(x,y)
+\end{equation}
+
+yielding $\bar{h} \in \mathbb{R}^{64}$, which is passed through
+two linear layers with GELU activation:
+
+\begin{equation}
+D_{\text{stat}}(\mathcal{T}) = L_{n_1} \cdot
+\text{GELU}(L_{n_2} \cdot \bar{h})
+\end{equation}
+
+\paragraph{Physical discriminator $D_{\text{phys}}$.}
+Receives the sequence of Navier-Stokes residuals
+\[
+R =
+\begin{pmatrix}
+R^0 \\
+R^1 \\
+\vdots \\
+R^{T-2}
+\end{pmatrix}
+\in \mathbb{R}^{(T-1) \times H \times W}
+\]
+A temporal convolutional encoder produces
+$h \in \mathbb{R}^{64 \times H \times W}$:
+
+\begin{equation}
+R \;\longrightarrow\; h \in \mathbb{R}^{64 \times H \times W}
+\end{equation}
+
+The convolution across channels is given by:
+
+\begin{equation}
+h_k(x,y) = \sum_{i=1}^{64} W_{k,i}\, R_i(x,y)
+\end{equation}
+
+The representation is then processed by FNO blocks, preserving
+the dimensionality:
+
+\begin{equation}
+h \;\longrightarrow\; h' \in \mathbb{R}^{64 \times H \times W}
+\end{equation}
+
+A spatial average is applied:
+
+\begin{equation}
+\bar{h}_k = \frac{1}{HW} \sum_{x,y} h'_k(x,y)
+\end{equation}
+
+yielding $\bar{h} \in \mathbb{R}^{64}$, which is passed through
+two linear layers with GELU activation:
+
+\begin{equation}
+D_{\text{phys}}(R) = L_{n_1} \cdot
+\text{GELU}(L_{n_2} \cdot \bar{h})
+\end{equation}
+
+\subsection{Objective Function}
+
+The full training objective couples both discriminators.
+Each discriminator is updated independently with its own
+gradient penalty:
+
+\begin{align}
+\mathcal{L}_{D_{\text{stat}}} &= \mathbb{E}[D_{\text{stat}}(T_{\text{fake}})]
+- \mathbb{E}[D_{\text{stat}}(T_{\text{real}})] + \lambda\, GP_{\text{stat}} \\
+\mathcal{L}_{D_{\text{phys}}} &= \mathbb{E}[D_{\text{phys}}(R_{\text{fake}})]
+- \mathbb{E}[D_{\text{phys}}(R_{\text{real}})] + \lambda\, GP_{\text{phys}}
+\end{align}
+
+The Wasserstein distance estimates used to monitor training are:
+
+\begin{align}
+W_{\text{stat}} &\approx \mathbb{E}[D_{\text{stat}}(\omega_{\text{real}})]
+- \mathbb{E}[D_{\text{stat}}(\omega_{\text{fake}})] \\
+W_{\text{phys}} &\approx \mathbb{E}[D_{\text{phys}}(R_{\text{real}})]
+- \mathbb{E}[D_{\text{phys}}(R_{\text{fake}})]
+\end{align}
+
+The generator is trained to minimize:
+
+\begin{equation}
+\mathcal{L}_G = -\mathbb{E}[D_{\text{stat}}(\omega_{\text{fake}})]
+              - \mathbb{E}[D_{\text{phys}}(R_{\text{fake}})]
+\end{equation}
+
+with gradients computed via the chain rule through both
+discriminator paths:
+
+\begin{equation}
+\frac{\partial \mathcal{L}_G}{\partial \theta_G} =
+\frac{\partial \mathcal{L}}{\partial \omega_{\text{fake}}}
+\cdot \frac{\partial \omega_{\text{fake}}}{\partial \theta_G}
++ \frac{\partial \mathcal{L}}{\partial R_{\text{fake}}}
+\cdot \frac{\partial R_{\text{fake}}}{\partial \omega_{\text{fake}}}
+\cdot \frac{\partial \omega_{\text{fake}}}{\partial \theta_G}
+\end{equation}
+
+\subsection{Autoregressive Rollout}
+
+The generator produces trajectories autoregressively.
+Given an initial condition $\omega^0$, each subsequent
+frame is obtained by feeding the previous prediction
+back into the generator:
+
+\begin{equation}
+\omega^{t+1} = G(\omega^t, z), \quad z \sim \mathcal{N}(0, I)
+\end{equation}
+
+A full trajectory of length $T$ is therefore:
+
+\begin{equation}
+\mathcal{T} = \{\omega^0,\, G(\omega^0, z),\,
+G^2(\omega^0, z),\, \ldots,\, G^T(\omega^0, z)\}
+\end{equation}
+
+This is equivalent to approximating the continuous-time
+operator $\partial_t \omega = F(\omega)$ by a discrete
+map $\omega^{t+1} \approx \omega^t + h(\omega^t)$,
+where $h$ is learned by the FNO. The stochastic latent
+vector $z$ is resampled at each step, allowing the model
+to represent the distributional uncertainty of turbulent
+trajectories rather than collapsing to a single deterministic path.
+
+% ============= METHODOLOGY =============
+\section{Methodology}
+
+\subsection{Dataset}
+
+The dataset is sourced from the \texttt{scaomath/navier-stokes-dataset} repository
+on Hugging Face \cite{scaomath2024}. It consists of isotropic turbulence trajectories
+modeled by the 2D incompressible Navier-Stokes equations, generated using a
+pseudo-spectral solver with a 4th-order Runge-Kutta scheme for the convection term.
+Different initial conditions with varying peak wavenumbers of $\mathcal{O}(1)$ are
+included, all converging to the Kolmogorov inverse energy cascade. The dataset
+contains 4 different fields including vorticity, differential, stream and residue including 1,152 trajectories of 100 timesteps each on a $64 \times 64$ spatial grid each,
+yielding a tensor of shape $(4, 1152, 100, 64, 64)$ for the implementation we only used the vorticty field represented by
+$\omega(x, t) = \nabla \times u$.
+
+\subsection{Preprocessing}
+The vorticity field is first normalized using a min–max scaling to the range [0,1]. It is then standardized by subtracting the global mean and dividing by the global standard deviation computed over the entire dataset. Sliding windows of length $T_{seq} = 10$ are constructed over each trajectory, producing input–output pairs $(\omega_n, \omega_{n+1})$ for autoregressive training. This results in a total of 103,680 training windows. An 80/20 train–validation split is applied at the window level.
+
+\subsection{Implementation}
+
+The model is implemented in PyTorch and trained on a CUDA-enabled GPU.
+The architecture follows a dual-discriminator Wasserstein GAN with Gradient
+Penalty (WGAN-GP) framework, where the generator is a Fourier Neural Operator.
+
+The generator $G_\theta$ receives the current vorticity field $\omega_n$
+alongside a stochastic latent vector $z \sim \mathcal{N}(0, I)$ and produces
+the next timestep $\omega_{n+1}$. Trajectories are generated autoregressively,
+feeding each predicted frame as input to the next step.
+
+Two specialized discriminators are maintained independently throughout training,
+each with its own optimizer, learning rate scheduler, and Wasserstein distance
+estimate. The statistical discriminator $D_{stat}$ receives complete generated
+trajectories and judges their distributional realism. The physical discriminator
+$D_{phys}$ receives the Navier-Stokes residual field computed between consecutive
+frames and judges physical consistency independently of statistical appearance.
+
+The Navier-Stokes residual is computed spectrally at each training step, with
+viscosity $\nu$ and forcing $f$ sampled stochastically to reflect the variability
+observed in the dataset. Both discriminators are updated $n_{critic} = 2$ times
+per generator step. Gradient penalty is applied independently to each discriminator
+over interpolated inputs in their respective input spaces.
+
+Training progress is monitored through five validation metrics computed at the
+end of each epoch over the held-out validation set: mean squared error against
+ground truth, Navier-Stokes residual magnitude, kinetic energy, enstrophy, and
+spectral correlation. Two independent Wasserstein distance estimates — one per
+discriminator — serve as the primary indicators of adversarial equilibrium.
+
+The next table presents the hyperparameters used in the training:
+\begin{table}[h]
+\centering
+\caption{Training and model hyperparameters}
+\begin{tabular}{l c}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+Grid size $(H, W)$ & $64 \times 64$ \\
+Sequence length $T$ & $10$ \\
+Epochs & $30$ \\
+Batch size & $8$ \\
+Fourier modes & $12$ \\
+Hidden channels & $32$ \\
+FNO layers & $4$ \\
+Critic steps $n_{\text{critic}}$ & $2$ \\
+Latent dimension $z$ & $8$ \\
+Time step $\Delta t$ & $0.05$ \\
+Gradient penalty $\lambda$ & $10.0$ \\
+\hline
+\end{tabular}
+\end{table}
+
+{\color{red} Also a baseline MSE-FNO was trained to contrast step evolution in the context of the spurious attractor, as discussed later in the text.}
+
+% ============= RESULTS =============
+\section{Results}
+
+\subsection{Training Metrics}
+Both discriminators were trained with a learning
+rate of $10^{-4}$, while the generator learning rate was halved to $5 \times 10^{-5}$
+after epoch 9 via a \texttt{ReduceLROnPlateau} scheduler conditioned on validation MSE.
+
+\subsubsection{Wasserstein Distances and Adversarial Losses}
+
+The Wasserstein distances for both critics increased monotonically during the first
+ten epochs and subsequently plateaued, indicating that the discriminators reached a
+stable equilibrium with the generator. Specifically, $W_\text{stat}$ stabilized
+around $111$ and $W_\text{phys}$ around $1{,}320$. This is consistent with standard
+WGAN dynamics: the critic score reflects distributional distance rather than
+classification confidence, and a plateau indicates that the generator produces
+samples whose distribution is consistently separated from the real data manifold
+by a stable margin.
+
+The generator loss $\mathcal{L}_G$ grew steadily throughout training, reaching
+approximately $2{,}377$ by epoch 30. This is the expected behavior in WGAN-GP
+training: as the discriminators improve their ability to distinguish real from
+generated samples, the adversarial signal pushes the generator loss upward. The
+discriminator losses $\mathcal{L}_{D_\text{stat}}$ and $\mathcal{L}_{D_\text{phys}}$
+remained negative throughout training, reflecting the Wasserstein objective in which
+critics are rewarded for assigning higher scores to real samples and lower scores
+to generated ones.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.3\textwidth]{Images/training_metrics/w_stat.png}
+    \hfill
+    \includegraphics[width=0.3\textwidth]{Images/training_metrics/w_phys.png}
+    \hfill
+    \includegraphics[width=0.3\textwidth]{Images/training_metrics/losses.png}
+    \caption{Wasserstein distances and Losses.}
+    \label{fig:wasserstein_losses}
+\end{figure}
+
+\subsubsection{Validation MSE}
+
+The validation MSE decreased sharply from $0.528$ at epoch 0 to approximately $0.248$
+by epoch 1, and continued decreasing gradually throughout training, reaching a best
+value of approximately $0.202$ at epoch 27.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{Images/training_metrics/mse.png}
+    \caption{Validation MSE across epochs.}
+    \label{fig:mse}
+\end{figure}
+
+\subsubsection{Physical Conservation Metrics}
+
+The ratio of generated to real energy and enstrophy fluctuates around $1.0$ throughout
+training, indicating that the generator broadly preserves these integral invariants of
+the 2D Navier--Stokes equations. However, the oscillatory behavior particularly in
+enstrophy, which exhibits excursions between $0.78$ and $1.16$ suggests that the
+physics discriminator provides a regularizing signal rather than enforcing strict
+conservation.
+
+The Navier--Stokes residual on the validation set increased from approximately $13$
+at epoch 0 to values oscillating between $17$ and $20$ throughout the remainder of
+training. The residual remains noisy and does not
+ decrease. Which can suggest a flaw in conservation adjustments.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/training_phys.png}
+    \hfill
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/training_res.png}
+    \caption{Left: ratio of generated to real energy and enstrophy over training.
+    Right: Navier--Stokes residual on the validation set.}
+    \label{fig:training_phys}
+\end{figure}
+
+\subsubsection{Spectral Diagnostics at Epoch 30}
+
+The spectral diagnostics at epoch 30 evaluate the quality of the generated turbulent
+fields in Fourier space, assessing whether the generator reproduces the correct
+distribution of energy across scales, the correct inter-scale energy transfer, and
+phase coherence with the ground-truth fields.
+
+\paragraph{Enstrophy spectrum.}
+The enstrophy spectrum $Z(k)$ of the generated fields closely follows the real
+spectrum across the resolved wavenumber range $k \in [1, 40]$. Both spectra peak
+near $k \approx 3$--$4$ and exhibit a plateau at intermediate wavenumbers consistent
+with the theoretical $k^{-1}$ scaling for 2D turbulence in the enstrophy cascade
+regime. At high wavenumbers ($k > 10$), the generated spectrum exhibits slightly more
+variability but remains within one order of magnitude of the real spectrum.
+
+\paragraph{Palinstrophy spectrum.}
+The palinstrophy spectrum $P(k)$, which measures the squared gradient of vorticity
+and is sensitive to small-scale structures, is well reproduced by the generator across
+the full wavenumber range. Both spectra increase monotonically with $k$ and lie well
+above the $k^{+1}$ reference scaling, indicating that palinstrophy is concentrated at
+small scales as expected in 2D turbulence. The close agreement suggests that the
+generator captures fine-scale vorticity gradients accurately, despite these not being
+explicitly penalized during training.
+
+\paragraph{Enstrophy transfer spectrum.}
+The enstrophy transfer spectrum $T(k)$ characterizes the nonlinear inter-scale
+enstrophy flux. Both the real and generated spectra exhibit the same qualitative
+structure: positive transfer at large scales ($k < 4$), a pronounced negative peak
+near $k \approx 4$--$5$, and near-zero transfer at small scales. The generator
+reproduces the location and approximate depth of the negative peak, though it slightly
+overestimates the magnitude. This confirms that the adversarial training promotes
+correct nonlinear cascade dynamics without explicit transfer spectrum supervision.
+
+\paragraph{Spectral correlation.}
+The spectral correlation $C(k)$ measures phase coherence between generated and real
+fields in Fourier space, with $C(k) = 1$ indicating perfect agreement and $C(k) = 0$
+indicating no coherence. At large scales ($k < 4$), the correlation is near or above
+$1.0$, indicating that the generator faithfully reproduces dominant large-scale
+structures. The correlation decreases progressively at intermediate and small scales,
+dropping below $0.5$ near $k \approx 8$ and approaching zero for $k > 15$. This
+decay is expected for an autoregressive model without explicit phase supervision.
+The final mean spectral correlation of approximately $0.30$ across all wavenumbers
+indicates meaningful but limited phase coherence, consistent with the model learning
+the correct distribution of turbulent structures rather than predicting individual
+deterministic realizations.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/enstrophy_spectrum_epoch0030.png}
+    \hfill
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/palinstrophy_spectrum_epoch0030.png}
+    \caption{Left: enstrophy spectrum $Z(k)$ at epoch 30. Right: palinstrophy spectrum $P(k)$
+    at epoch 30.}
+    \label{fig:spectra_ep30}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/transfer_spectrum_epoch0030.png}
+    \hfill
+    \includegraphics[width=0.45\textwidth]{Images/training_metrics/spectral_correlation_epoch0030.png}
+    \caption{Left: enstrophy transfer spectrum $T(k)$ at epoch 30. Right: spectral correlation $C(k)$ at
+    epoch 30.}
+    \label{fig:transfer_correlation_ep30}
+\end{figure}
+
+These results confirm that adversarial training with physics-informed discriminators
+promotes statistically consistent turbulent structures without enforcing them through
+explicit equation constraints, and that the generator successfully approximates the
+spectral properties of the ground-truth 2D turbulent fields across the resolved range
+of scales.
+
+\subsection{Super-Resolution}
+
+A fundamental property of Fourier Neural Operators is their formulation directly
+on function spaces, rendering the learned mapping independent of the discretization
+grid used during training. To validate this in the context of turbulent vorticity
+dynamics, a zero-shot super-resolution rollout was performed: the pretrained
+generator was applied autoregressively to an initial condition upsampled from
+$64{\times}64$ to $256{\times}256$ resolution,
+$\omega_{\text{HR}}^0 \in \mathbb{R}^{256 \times 256} =
+\operatorname{Interp}(\omega_{\text{LR}}^0)$, demonstrating the model's inherent
+capability to operate on finer grids without retraining.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=.6\textwidth]{Images/super_resolution/super_res_t5.png}
+    \caption{Super-Resolution Example.}
+    \label{fig:superres}
+\end{figure}
+
+\subsection{Domain Decomposition}
+To assess the spatial generalization of the model, a domain decomposition strategy
+was applied, partitioning the full $64 \times 64$ vorticity domain into overlapping
+subdomains that are processed independently and subsequently reassembled. The
+physical diagnostic metrics confirm that the model preserves energy and enstrophy
+distributions across subdomain boundaries, and that the reconstructed global fields
+maintain physical consistency. This result suggests that the FNO generator has
+learned spatially local features that transfer across domain partitions without
+requiring global context, a desirable property for scalable simulation surrogates.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{Images/domain_decomposition/diagnosticos_domain_decomp.png}
+    \caption{Analysis of Physical Metrics.}
+    \label{fig:domain_diag}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{Images/domain_decomposition/FNO-Domain Decomposition.png}
+    \caption{Domain Decomposition Results.}
+    \label{fig:domain_decomp}
+\end{figure}
+
+\subsection{Inverse Boundary Method}
+The IBM zero-shot experiment evaluates the ability of the pretrained FNO generator
+to simulate vorticity dynamics in the presence of solid obstacles without any
+fine-tuning. Three obstacle geometries were tested: a centered circle of radius
+$r = 0.08$, an off-center circle of radius $r = 0.12$, and a centered rectangle.
+In each case, the immersed boundary condition $\psi = 0$ inside the obstacle was
+enforced at every autoregressive step via iterative volume penalization applied
+to the stream function recovered from the predicted vorticity field through a
+spectral Poisson solver. The algorithmic details of the immersed boundary
+implementation are provided in the Mathematical Foundations section.
+
+The enstrophy evolution reveals that the penalization
+significantly alters the vorticity field produced by the surrogate model.
+This is primarily due to the reflection and scattering of the stream function
+induced by the obstacle, which modifies the local vorticity gradients and
+generates secondary flow structures.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=.6\textwidth]{Images/IBM/energia_ibm_zeroshot.png}
+    \caption{IBM Energy Analysis.}
+    \label{fig:ibm_energy}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=.8\textwidth]{Images/IBM/ibm_snapshot.png}
+    \caption{IBM Snapshot.}
+    \label{fig:ibm_snapshot}
+\end{figure}
+
+\subsection{FID Distance}
+
+\subsubsection{Baseline Comparison}
+
+The quality of the generated trajectories was assessed using the Fréchet Distance
+(FD) computed in the feature space of the two trained discriminators, following the
+methodology of the Fréchet Inception Distance but substituting the Inception network
+with domain-specific critics tailored to turbulent vorticity fields. Features from
+\texttt{D\_stat} and \texttt{D\_phys} were concatenated to form a joint
+representation capturing both statistical and physical characteristics of each
+trajectory.
+
+Formally, let $\boldsymbol{\mu}_r, \boldsymbol{\Sigma}_r$ and
+$\boldsymbol{\mu}_g, \boldsymbol{\Sigma}_g$ denote the mean vectors and covariance
+matrices of the concatenated features computed from real and generated trajectories,
+respectively. The Fréchet Distance is then defined as:
+\begin{equation}
+\text{FD} = \left\| \boldsymbol{\mu}_r - \boldsymbol{\mu}_g \right\|_2^2
++ \operatorname{Tr}\left( \boldsymbol{\Sigma}_r + \boldsymbol{\Sigma}_g
+- 2\left( \boldsymbol{\Sigma}_r \boldsymbol{\Sigma}_g \right)^{1/2} \right)
+\end{equation}
+The FD was computed over $10$ independent random subsets of $100$ validation
+samples and reported as mean $\pm$ standard deviation.
+
+As shown in Table~\ref{tab:fd}, the reference value $\text{FD}(\text{GT}, \text{GT}) = 0.0023 \pm 0.0005$
+establishes the natural variability floor of the metric under sampling noise.
+The GAN-based generator (Gen) achieves $\text{FD} = 0.2507 \pm 0.0159$, while
+{\color{red} the MSE-trained baseline obtains $\text{FD} = 0.0783 \pm 0.0159$. The lower FD
+of the baseline is explained by its training objective: direct MSE supervision
+with a larger model capacity ($\texttt{hidden\_ch} = 64$ versus $32$ for Gen)
+encourages the generator to produce trajectories that are metrically close to the
+ground truth in an $\ell_2$ sense, which is directly reflected in the discriminator
+feature space. The GAN generator, by contrast, optimizes a distributional objective
+and does not minimize pointwise reconstruction error, leading to a higher FD despite
+producing trajectories with richer turbulent structure and better spectral
+characteristics.
+
+Visual inspection of the feature embeddings reveals that
+the Baseline cluster overlaps substantially with the Ground Truth distribution,
+whereas the Gen cluster is shifted, indicating a systematic distributional offset.
+Notably, this offset is not fixed: with extended training, the generator's feature
+distribution gradually drifts toward the real manifold, suggesting that the
+reported FD for the GAN model could be further reduced by additional epochs or
+improved hyperparameter tuning.}
+
+\begin{table}[H]
+\centering
+\caption{Fréchet Distance (FD) comparison}
+\label{tab:fd}
+\begin{tabular}{l c}
+\hline
+\textbf{Comparison} & \textbf{FD (mean $\pm$ std)} \\
+\hline
+GT vs GT       & $0.0023 \pm 0.0005$ \\
+GT vs Gen      & $0.2507 \pm 0.0159$ \\
+{\color{red} GT vs Baseline} & {\color{red} $0.0783 \pm 0.0159$} \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=.6\textwidth]{Images/FID/PCA.png}
+    \caption{PCA of feature space.}
+    \label{fig:pca}
+\end{figure}
+
+\subsubsection{Fourier Spurious Attractor}
+
+A notable failure mode was identified during autoregressive rollouts
+extended beyond the training horizon. When the generator is unrolled
+for more than approximately $75$ steps — well past the training sequence
+length of $10$ — the predicted vorticity fields begin to exhibit a
+spurious diagonal wavenumber pattern accompanied by vertical striping
+artifacts (Fig.~\ref{fig:attractor}).
+
+This behavior is consistent with the emergence of a non-physical
+attractor in Fourier space. In the autoregressive setting, each
+prediction is fed back as input, causing the trajectory to explore
+regions of the latent space and energy spectrum that lie far from the
+training distribution. Under these conditions, the Fourier Neural
+Operator tends to revert to the dominant linear dynamics embedded in
+its learned weights — primarily those associated with horizontal
+wavenumber bands. The observed spurious diagonal and striping patterns
+correspond to residual Fourier components that were present during
+training but become unstable and self-amplifying when iterated beyond
+the intended temporal window. This highlights a known vulnerability of
+autoregressive FNO rollouts: the accumulation of spectral bias errors
+leads to a gradual drift away from the physical manifold of the
+Navier–Stokes equations.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{Images/spurial_attractor/Spurial Behaviour.png}
+    \caption{Appearance of spurious attractor over time.}
+    \label{fig:attractor}
+\end{figure}
+
+% ============= CONCLUSIONS =============
+\section{Conclusions}
+
+\textbf{Make conclusions about the methods implemented in the work (formal mathematics)}
+
+\subsection{Future Work}
+
+\begin{itemize}
+    \item \textbf{Stability:} Train on longer sequences or add spectral regularization to suppress spurious high-wavenumber modes.
+    \item \textbf{Physical consistency:} Embed differentiable Poisson solver or conservation constraints into the generator.
+\end{itemize}
+
+% ============= REFERENCES =============
+\begin{thebibliography}{99}
+
+\bibitem{navier-stokes-dataset}
+{scaomath},
+\textit{Navier Stokes Dataset of Isotropic Turbulence in a Periodic Box},
+HuggingFace, 2024.
+DOI: 10.57967/hf/2470.
+\url{https://huggingface.co/datasets/scaomath/navier-stokes-dataset}
+
+\bibitem{generative-adversarial-neural-operators}
+M.~A. Rahman, M.~A. Florez, A. Anandkumar, Z.~E. Ross, K. Azizzadenesheli,
+\textit{Generative Adversarial Neural Operators},
+arXiv:2205.03017, 2022.
+\url{https://arxiv.org/abs/2205.03017}
+
+\end{thebibliography}
+
+\end{document}
