@@ -1,5 +1,5 @@
 The following has on purpose to present the organization of the github repository: 
-
+```
 .
 ├── Analysis
 │   ├── Initial             # Contains the initial analysis of the dataset and other interesting simulations as the physics of the phenomena we are modeling. 
@@ -12,4 +12,5 @@ The following has on purpose to present the organization of the github repositor
     ├── Other               # Other code including the preprocessing pipeline.
     └── Tests               # Test used to evaluate the performance and execution of the models. 
 
+```
 
