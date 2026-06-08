@@ -11,10 +11,7 @@ import random
 
 logger = logging.getLogger(__name__)
 
-
-# ═══════════════════════════════════════════════════════════
-# CONFIGURACIÓN DE LOGGING (se llama desde el notebook)
-# ═══════════════════════════════════════════════════════════
+# ── Configuración de logging ──────────────────────────────
 def setup_logging(log_file="training.log"):
     logging.basicConfig(
         level=logging.INFO,
@@ -25,11 +22,11 @@ def setup_logging(log_file="training.log"):
         ],
     )
 
-
 # ═══════════════════════════════════════════════════════════
 # 1. DATASET
 # ═══════════════════════════════════════════════════════════
 class KolmogorovDataset(Dataset):
+    # ... (sin cambios)
     def __init__(self, path, seq_len=10):
         path = Path(path)
         assert path.exists(), f"No se encontró: {path}"
@@ -65,13 +62,12 @@ class KolmogorovDataset(Dataset):
         t0          = idx %  self.n_windows
         traj        = self.w[traj_idx, t0 : t0 + self.seq_len + 1]
         traj_tensor = torch.from_numpy(traj.copy())
-        seq_in      = traj_tensor[:-1].unsqueeze(1)   # (seq_len, 1, H, W)
-        seq_out     = traj_tensor[1:].unsqueeze(1)    # (seq_len, 1, H, W)
-        return seq_in, seq_out, traj_tensor            # traj_tensor: (seq_len+1, H, W)
-
+        seq_in      = traj_tensor[:-1].unsqueeze(1)
+        seq_out     = traj_tensor[1:].unsqueeze(1)
+        return seq_in, seq_out, traj_tensor
 
 # ═══════════════════════════════════════════════════════════
-# 2. BLOQUE ESPECTRAL
+# 2. BLOQUE ESPECTRAL (versión original con complex)
 # ═══════════════════════════════════════════════════════════
 class SpectralConv2d(nn.Module):
     def __init__(self, in_ch, out_ch, modes1, modes2):
@@ -99,11 +95,11 @@ class SpectralConv2d(nn.Module):
             xf[:, :, -self.modes1:, :self.modes2], self.W2)
         return torch.fft.irfft2(out, s=(H, W))
 
-
 # ═══════════════════════════════════════════════════════════
 # 3. CAPA FNO
 # ═══════════════════════════════════════════════════════════
 class FNOBlock(nn.Module):
+    # ... (sin cambios)
     def __init__(self, ch, modes1, modes2):
         super().__init__()
         self.spectral = SpectralConv2d(ch, ch, modes1, modes2)
@@ -113,11 +109,11 @@ class FNOBlock(nn.Module):
     def forward(self, x):
         return F.gelu(self.norm(self.spectral(x) + self.local(x)))
 
-
 # ═══════════════════════════════════════════════════════════
-# 4. GENERADOR — FNO puro, sustituto de simulación
+# 4. GENERADOR
 # ═══════════════════════════════════════════════════════════
 class FNOGenerator(nn.Module):
+    # ... (sin cambios)
     def __init__(self, hidden_ch=64, modes1=12, modes2=12, n_layers=4, z_dim=4):
         super().__init__()
         self.z_dim  = z_dim
@@ -143,7 +139,6 @@ class FNOGenerator(nn.Module):
             h = layer(h)
         return w_n + self.proj(h)
 
-
 # ═══════════════════════════════════════════════════════════
 # 5. RESIDUO NAVIER-STOKES
 # ═══════════════════════════════════════════════════════════
@@ -158,13 +153,11 @@ class NavierStokesResiduo(nn.Module):
         self.dt     = dt
         self.modes1 = modes1
         self.modes2 = modes2
-
         kx = torch.fft.fftfreq(W, d=1.0 / W)
         ky = torch.fft.fftfreq(H, d=1.0 / H)
         KY, KX = torch.meshgrid(ky, kx, indexing="ij")
         K2     = KX ** 2 + KY ** 2
         K2_inv = K2.clone(); K2_inv[0, 0] = 1.0
-
         self.register_buffer("KX",     KX)
         self.register_buffer("KY",     KY)
         self.register_buffer("K2",     K2)
@@ -208,24 +201,48 @@ class NavierStokesResiduo(nn.Module):
         f       = self._sample_f(w_n.shape, w_n.device)
         dwdt    = (w_next - w_n) / self.dt
         spatial = self._spatial_terms(w_n, nu, f)
-        return dwdt + spatial
+        return dwdt + spatial, nu, f
 
     def residuo_espacial(self, traj):
         B, T, H, W = traj.shape
         residuos = []
+        nus = []
+        fs = []
         for t in range(T - 1):
-            r = self._residuo_campo(traj[:, t], traj[:, t + 1])
+            r, nu, f = self._residuo_campo(traj[:, t], traj[:, t + 1])
             residuos.append(r)
-        return torch.stack(residuos, dim=1)
+            nus.append(nu)
+            fs.append(f)
+        return torch.stack(residuos, dim=1), nus, fs
+
+    def energy_conservation_residual(self, traj, nus, fs):
+        B, T, H, W = traj.shape
+        res = []
+        for t in range(T - 1):
+            w_n    = traj[:, t]
+            w_next = traj[:, t+1]
+            wf_n    = torch.fft.fft2(w_n);    wf_n[:, 0, 0]    = 0
+            wf_next = torch.fft.fft2(w_next); wf_next[:, 0, 0] = 0
+            E_n    = 0.5 * (wf_n.abs()**2    * self.K2_inv).sum(dim=(1,2)) / (H*W)
+            E_next = 0.5 * (wf_next.abs()**2 * self.K2_inv).sum(dim=(1,2)) / (H*W)
+            dE_dt  = (E_next - E_n) / self.dt
+            Z      = 0.5 * (w_n**2).mean(dim=(1,2))
+            nu     = nus[t]
+            f      = fs[t]
+            f_omega = (f * w_n).mean(dim=(1,2))
+            rhs    = -2 * nu * Z + f_omega
+            res.append(dE_dt - rhs)
+        return torch.stack(res, dim=1)
 
     def forward(self, traj):
-        return (self.residuo_espacial(traj) ** 2).mean()
-
+        R, _, _ = self.residuo_espacial(traj)
+        return (R ** 2).mean()
 
 # ═══════════════════════════════════════════════════════════
 # 6. ROLLOUT
 # ═══════════════════════════════════════════════════════════
 class Rollout:
+    # ... (sin cambios)
     def __init__(self, generator, device):
         self.generator = generator.to(device)
         self.device    = device
@@ -258,9 +275,8 @@ class Rollout:
                 diff.norm(dim=(2, 3)) / (w_true[:, :T].norm(dim=(2, 3)) + 1e-8)
             ).mean(0).numpy()
 
-
 # ═══════════════════════════════════════════════════════════
-# 7. FUNCIONES ESPECTRALES
+# 7. FUNCIONES ESPECTRALES (sin cambios)
 # ═══════════════════════════════════════════════════════════
 def energy_spectrum(w):
     if w.ndim == 2: w = w.unsqueeze(0)
@@ -276,7 +292,6 @@ def energy_spectrum(w):
     E_np   = E_mean.cpu().numpy()
     E_k    = np.array([E_np[(K_np >= k-.5) & (K_np < k+.5)].sum() for k in k_bins])
     return k_bins, E_k
-
 
 def enstrophy_spectrum(w):
     if w.ndim == 2: w = w.unsqueeze(0)
@@ -294,7 +309,6 @@ def enstrophy_spectrum(w):
     Z_k    = np.array([Z_np[(K_np >= k-.5) & (K_np < k+.5)].sum() for k in k_bins])
     return k_bins, Z_k
 
-
 def palinstrophy_spectrum(w):
     if w.ndim == 2: w = w.unsqueeze(0)
     B, H, W = w.shape
@@ -310,7 +324,6 @@ def palinstrophy_spectrum(w):
     P_np   = P_mean.cpu().numpy()
     P_k    = np.array([P_np[(K_np >= k-.5) & (K_np < k+.5)].sum() for k in k_bins])
     return k_bins, P_k
-
 
 def transfer_spectrum(w, KX, KY, K2, K2_inv):
     if w.ndim == 2: w = w.unsqueeze(0)
@@ -328,7 +341,6 @@ def transfer_spectrum(w, KX, KY, K2, K2_inv):
     k_bins  = np.arange(1, k_max + 1)
     T_k     = np.array([T_np[(K_mag >= k-.5) & (K_mag < k+.5)].sum() for k in k_bins])
     return T_k, k_bins
-
 
 def spectral_correlation(w_real, w_fake):
     if w_real.ndim == 2: w_real = w_real.unsqueeze(0)
@@ -354,36 +366,33 @@ def spectral_correlation(w_real, w_fake):
     ])
     return k_bins, C_k
 
-
 # ═══════════════════════════════════════════════════════════
 # 8. UTILIDADES DE PERSISTENCIA ATÓMICA
 # ═══════════════════════════════════════════════════════════
 def save_atomic(obj, path):
-    """Guarda un objeto con torch.save de forma atómica (evita corrupción)."""
     tmp_path = Path(str(path) + ".tmp")
     torch.save(obj, tmp_path)
     os.replace(tmp_path, path)
 
-
 def load_torch(path):
     return torch.load(path, map_location="cpu")
 
-
 # ═══════════════════════════════════════════════════════════
-# 9. BASE TRAINER (manejo de logs, checkpoints, historial, resume)
+# 9. BASE TRAINER — con early stopping (SIN AMP)
 # ═══════════════════════════════════════════════════════════
 class BaseTrainer:
-    def __init__(self, log_dir="logs", resume=False, best_metric_name="val_loss"):
-        self.log_dir = Path(log_dir)
+    def __init__(self, log_dir="logs", resume=False, best_metric_name="val_loss",
+                 patience=10):
+        self.log_dir           = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.resume = resume
-        self.best_metric_name = best_metric_name
-        self.best_val = float("inf")
-        self.epoch_start = 0
-        self.history = {}
-
+        self.resume            = resume
+        self.best_metric_name  = best_metric_name
+        self.best_val          = float("inf")
+        self.epoch_start       = 0
+        self.history           = {}
+        self.patience          = patience
+        self.epochs_no_improve = 0
         self._setup_logger()
-
         if resume:
             self._resume_state()
         if not self.history:
@@ -397,25 +406,24 @@ class BaseTrainer:
             handler.flush()
 
     def _init_history_keys(self):
-        """Sobreescribir en subclase para inicializar las claves del historial."""
         pass
 
     def _resume_state(self):
         ckpt_path = self.log_dir / "latest_checkpoint.pt"
         hist_path = self.log_dir / "history.json"
-
         if ckpt_path.exists():
             self.logger.info(f"Reanudando desde {ckpt_path}")
             checkpoint = load_torch(ckpt_path)
             self._load_checkpoint_state(checkpoint)
-            self.epoch_start = checkpoint["epoch"] + 1
-            self.best_val = checkpoint.get("best_val", float("inf"))
+            self.epoch_start       = checkpoint["epoch"] + 1
+            self.best_val          = checkpoint.get("best_val", float("inf"))
+            self.epochs_no_improve = checkpoint.get("epochs_no_improve", 0)
             self._restore_rng(checkpoint.get("rng_state"))
         else:
-            self.logger.warning("No se encontró checkpoint para reanudar; empezando desde cero.")
-            self.epoch_start = 0
-            self.best_val = float("inf")
-
+            self.logger.warning("No se encontró checkpoint; empezando desde cero.")
+            self.epoch_start       = 0
+            self.best_val          = float("inf")
+            self.epochs_no_improve = 0
         if hist_path.exists():
             with open(hist_path, "r") as f:
                 self.history = json.load(f)
@@ -432,7 +440,7 @@ class BaseTrainer:
     def _get_rng_state(self):
         return {
             "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "cuda":  torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "numpy": np.random.get_state(),
             "python": random.getstate(),
         }
@@ -448,24 +456,19 @@ class BaseTrainer:
 
     def save_checkpoint(self, epoch, is_best=False):
         checkpoint = {
-            "epoch": epoch,
-            "best_val": self.best_val,
-            "rng_state": self._get_rng_state(),
+            "epoch":             epoch,
+            "best_val":          self.best_val,
+            "epochs_no_improve": self.epochs_no_improve,
+            "rng_state":         self._get_rng_state(),
         }
         self._save_checkpoint_state(checkpoint, epoch, is_best)
-
-        # checkpoint de recuperación (siempre)
         save_atomic(checkpoint, self.log_dir / "latest_checkpoint.pt")
-
-        # mejor modelo (solo si mejoró)
         if is_best:
-            best_model_state = self._get_best_model_state()
-            save_atomic(best_model_state, self.log_dir / "best_model.pt")
+            save_atomic(self._get_best_model_state(), self.log_dir / "best_model.pt")
             self.logger.info(f"✅ Nuevo mejor modelo guardado (epoch {epoch}).")
 
     def _save_history(self):
-        hist_path = self.log_dir / "history.json"
-        with open(hist_path, "w") as f:
+        with open(self.log_dir / "history.json", "w") as f:
             json.dump(self.history, f, indent=2)
 
     def _update_history(self, metrics_dict):
@@ -476,33 +479,31 @@ class BaseTrainer:
 
     def _check_best(self, current_val):
         if current_val < self.best_val:
-            self.best_val = current_val
+            self.best_val          = current_val
+            self.epochs_no_improve = 0
             return True
+        self.epochs_no_improve += 1
         return False
 
-    def log_epoch(self, epoch, metrics_dict):
-        # actualizar historial en memoria
-        self._update_history(metrics_dict)
-        # guardar historial en disco
-        self._save_history()
+    @property
+    def should_stop(self):
+        return self.epochs_no_improve >= self.patience
 
-        # determinar si es el mejor modelo
+    def log_epoch(self, epoch, metrics_dict):
+        self._update_history(metrics_dict)
+        self._save_history()
         current_val = metrics_dict.get(self.best_metric_name, None)
         is_best = False
         if current_val is not None:
             is_best = self._check_best(current_val)
-
-        # guardar checkpoint (recuperación + mejor modelo)
         self.save_checkpoint(epoch, is_best=is_best)
-
-        # construir mensaje de log
         msg = f"Época {epoch:4d} | " + " | ".join(
             f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}"
             for k, v in metrics_dict.items()
         )
         if is_best:
             msg += " ★"
+        if self.epochs_no_improve > 0:
+            msg += f" | no_improve: {self.epochs_no_improve}/{self.patience}"
         self.logger.info(msg)
-
-        # forzar escritura inmediata en disco
         self._flush_logs()

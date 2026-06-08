@@ -1,17 +1,20 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from pathlib import Path
 from lib.Common import BaseTrainer
 
+
 class FNOSupervisedTrainer(BaseTrainer):
-    def __init__(self, generator, device, lr=1e-4, log_dir="logs_mse", resume=False):
-        super().__init__(log_dir=log_dir, resume=resume, best_metric_name="val_loss")
-        self.G = generator.to(device)
-        self.device = device
-        self.opt = torch.optim.Adam(self.G.parameters(), lr=lr)
+    def __init__(self, generator, device, lr=1e-4, log_dir="logs_mse",
+                 resume=False, patience=10):
+        self.G         = generator.to(device)
+        self.device    = device
+        self.opt       = torch.optim.Adam(self.G.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
+
+        super().__init__(log_dir=log_dir, resume=resume,
+                         best_metric_name="val_loss",
+                         patience=patience)
 
     def _init_history_keys(self):
         self.history = {"train_loss": [], "val_loss": []}
@@ -21,7 +24,7 @@ class FNOSupervisedTrainer(BaseTrainer):
         self.opt.load_state_dict(checkpoint["optimizer_state"])
 
     def _save_checkpoint_state(self, checkpoint, epoch, is_best):
-        checkpoint["model_state"] = self.G.state_dict()
+        checkpoint["model_state"]     = self.G.state_dict()
         checkpoint["optimizer_state"] = self.opt.state_dict()
 
     def _get_best_model_state(self):
@@ -33,16 +36,14 @@ class FNOSupervisedTrainer(BaseTrainer):
         n = 0
         pbar = tqdm(loader, desc="Training MSE")
         for seq_in, seq_out, _ in pbar:
-            seq_in = seq_in.to(self.device)
+            seq_in  = seq_in.to(self.device)
             seq_out = seq_out.to(self.device)
             B, T, C, H, W = seq_in.shape
 
             loss = 0.0
             for t in range(T):
-                w_t = seq_in[:, t]
-                w_next_pred = self.G(w_t)
-                target = seq_out[:, t]
-                loss += self.criterion(w_next_pred, target)
+                w_next_pred = self.G(seq_in[:, t])
+                loss += self.criterion(w_next_pred, seq_out[:, t])
             loss /= T
 
             self.opt.zero_grad()
@@ -61,31 +62,31 @@ class FNOSupervisedTrainer(BaseTrainer):
         total_loss = 0.0
         n = 0
         for seq_in, seq_out, _ in loader:
-            seq_in = seq_in.to(self.device)
+            seq_in  = seq_in.to(self.device)
             seq_out = seq_out.to(self.device)
             B, T, C, H, W = seq_in.shape
             loss = 0.0
             for t in range(T):
-                w_t = seq_in[:, t]
-                w_next_pred = self.G(w_t)
-                target = seq_out[:, t]
-                loss += self.criterion(w_next_pred, target)
+                w_next_pred = self.G(seq_in[:, t])
+                loss += self.criterion(w_next_pred, seq_out[:, t])
             loss /= T
             total_loss += loss.item()
             n += 1
         self.G.train()
         return total_loss / n
 
-    def fit(self, train_loader, val_loader, epochs):
+    def fit(self, train_loader, val_loader, epochs=100):
         for epoch in range(self.epoch_start, epochs + 1):
             train_loss = self.train_epoch(train_loader)
-            val_loss = self.validate(val_loader)
+            val_loss   = self.validate(val_loader)
 
-            metrics = {
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-            }
+            metrics = {"train_loss": train_loss, "val_loss": val_loss}
             self.log_epoch(epoch, metrics)
+
+            if self.should_stop:
+                self.logger.info(f"Early stopping en epoch {epoch} — "
+                                 f"sin mejora por {self.patience} épocas.")
+                break
 
         self.logger.info(f"Entrenamiento finalizado. Mejor val_loss: {self.best_val:.6f}")
         return self.history
