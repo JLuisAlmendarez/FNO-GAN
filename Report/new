@@ -1,0 +1,47 @@
+\documentclass{llncs}
+
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+
+\begin{document}
+
+\title{Three Different Perspectives on Geometries for Surrogate Operators in CFD}
+
+\author{José Luis Almendarez Gonzalez}
+
+\authorrunning{Almendarez}
+
+\institute{ITESO University\\
+\email{jose.almendarez@iteso.mx}}
+
+\maketitle
+
+\begin{abstract}
+Your abstract goes here. Keep it between 150 and 250 words.
+\end{abstract}
+
+\keywords{keyword one \and keyword two \and keyword three}
+
+\section{Introduction}
+Your introduction here.
+
+\section{Methodology}
+Your methodology here.
+
+\section{Results}
+Your results here.
+
+\section{Conclusions}
+Your conclusions here.
+
+\begin{thebibliography}{8}
+
+\bibitem{ref1}
+Author, N.: Title of the paper. Journal Name \textbf{1}(1), 1--10 (2024)
+
+\bibitem{ref2}
+Author, N., Author2, N.: Book Title. Springer, City (2024)
+
+\end{thebibliography}
+
+\end{document}

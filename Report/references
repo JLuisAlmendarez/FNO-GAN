@@ -1,0 +1,42 @@
+
+\textit{Navier Stokes Dataset of Isotropic Turbulence in a Periodic Box},
+HuggingFace, 2024.
+\url{https://huggingface.co/datasets/scaomath/navier-stokes-dataset}
+
+\bibitem{generative-adversarial-neural-operators}
+M.~A. Rahman, M.~A. Florez, A. Anandkumar, Z.~E. Ross, K. Azizzadenesheli,
+\textit{Generative Adversarial Neural Operators},
+\url{https://arxiv.org/abs/2205.03017}
+
+
+Jean-Francois Le Gall 
+Measure Theory 
+
+Jean-Francois Le Gall 
+Prob Theory 
+
+Jean-Francois Le Gall 
+Lp measures
+
+FOURIER NEURAL OPERATOR FOR
+PARAMETRIC PARTIAL DIFFERENTIAL EQUATIONS
+https://arxiv.org/pdf/2010.08895
+
+Machine learning accelerated computational fluid dynamics
+https://arxiv.org/pdf/2102.01010
+
+Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations
+PINNS-RASSI.pdf
+
+
+Nicholas Geneva, Nicholas Zabaras,
+Modeling the dynamics of PDE systems with physics-constrained deep auto-regressive networks,
+Journal of Computational Physics,
+Volume 403,
+2020,
+109056,
+ISSN 0021-9991,
+https://doi.org/10.1016/j.jcp.2019.109056.
+
+Generative Adversarial Neural Operators
+Md Ashiqur Rahman, Manuel A. Florez, Anima Anandkumar, Zachary E. Ross, Kamyar Azizzadenesheli

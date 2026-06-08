@@ -1,92 +1,49 @@
-# =========================
-# PYTHON
-# =========================
+# ─── Python ─────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Extensiones compiladas
 *.so
 
-# Distribución / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# =========================
-# ENTORNOS VIRTUALES
-# =========================
-.env
-.venv
+# ─── Virtual environment ─────────────────────────────────
+py_env/
+.venv/
 env/
-venv/
-ENV/
 
-# =========================
-# JUPYTER
-# =========================
+# ─── Jupyter ─────────────────────────────────────────────
 .ipynb_checkpoints/
+*.ipynb_checkpoints/
 
-# =========================
-# LOGS
-# =========================
+# ─── Datasets (large files, ignore both raw and processed) ─
+Models/Dataset/Kolmogorov2d_fp32_64x64_N1152_Re1000_T100.pt
+Models/Dataset/snapshots_64x64_use.npy
+
+# ─── Training artifacts ──────────────────────────────────
 *.log
+logs_gan/
+logs_mse/
+logs_physics/
+latest_checkpoint.pt
+best_model.pt
 
-# =========================
-# CACHE
-# =========================
-.cache/
-.pytest_cache/
-.mypy_cache/
+# ─── LaTeX auxiliary files ───────────────────────────────
+Report/*.aux
+Report/*.log
+Report/*.fls
+Report/*.fdb_latexmk
+Report/*.synctex.gz
+Report/*.out
+Report/*.toc
+Report/*.blg
+Report/*.bbl
+Report/*.bcf
+Report/*.run.xml
+Report/respaldo/
 
-# =========================
-# IDEs / EDITORES
-# =========================
-.vscode/
-.idea/
-*.swp
-*.swo
+# Keep the compiled PDF (optional)
+# !Report/new.pdf
 
-# =========================
-# SISTEMA
-# =========================
+# ─── OS generated files ─────────────────────────────────
 .DS_Store
 Thumbs.db
-
-# =========================
-# DATOS PESADOS (TU CASO)
-# =========================
-datasets/
-*.npz
-*.npy
-*.h5
-*.hdf5
-
-# =========================
-# MODELOS (ML)
-# =========================
-*.pt
-*.pth
-*.ckpt
-
-# =========================
-# OTROS
-# =========================
-*.csv
-*.parquet
-
-tasks/media/
-*.gif
+*.swp
+*.tmp
+*~
